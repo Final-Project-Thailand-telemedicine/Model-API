@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
 import torch
 
 app = FastAPI()
@@ -8,6 +9,23 @@ app = FastAPI()
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
+@app.post("/uploadfile/")
+async def upload_file(file: UploadFile = File(...)):
+    # Read the file contents
+    file_content = await file.read()
+    
+    # Process the file content here (e.g., run a prediction model)
+    # For now, we'll just return a message with the filename and file size
+    file_size = len(file_content)
+    
+    # Return a response
+    return JSONResponse(content={
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "size": file_size,
+        "message": "File received successfully!"
+    })
 
 # Load your trained model
 # model = torch.load("model.pth")
