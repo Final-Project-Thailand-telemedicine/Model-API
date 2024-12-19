@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import torch
+import random
 
 app = FastAPI()
 
@@ -16,15 +17,14 @@ async def upload_file(file: UploadFile = File(...)):
     file_content = await file.read()
     
     # Process the file content here (e.g., run a prediction model)
-    # For now, we'll just return a message with the filename and file size
+    # For now, we'll just return a message with the filename and file size+
     file_size = len(file_content)
-    
+    print("file size :",file_size)
+    mockwound_state = random.randint(1, 4)
+
     # Return a response
     return JSONResponse(content={
-        "filename": file.filename,
-        "content_type": file.content_type,
-        "size": file_size,
-        "message": "File received successfully!"
+        "wound_state": mockwound_state,
     })
 
 # Load your trained model
