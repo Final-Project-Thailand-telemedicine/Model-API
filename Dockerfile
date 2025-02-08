@@ -7,14 +7,14 @@ WORKDIR /app
 # Copy the requirements file to the container
 COPY requirements.txt .
 
-# Install the dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN pip install -r requirements.txt
 
 # Copy the application files to the container
 COPY . .
 
-# Expose the port FastAPI runs on
-EXPOSE 8000
+# Expose FastAPI port
+EXPOSE 8080
 
-# Command to run the FastAPI application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Use uvicorn to run FastAPI in Docker
+CMD ["uvicorn", "model:app", "--host", "0.0.0.0", "--port", "8080"]
