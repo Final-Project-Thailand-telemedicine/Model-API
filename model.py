@@ -4,10 +4,15 @@ from torchvision.models import EfficientNet_B0_Weights
 import torch
 from torchvision import transforms, models
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 import os
+from datetime import datetime
 
+# ----------------------------
+# U-Net Segmentation Model
+# ----------------------------
 class UNet(nn.Module):
     def __init__(self, n_channels, n_classes):
         super(UNet, self).__init__()
@@ -50,8 +55,11 @@ class UNet(nn.Module):
 
         return torch.sigmoid(self.out(dec1))
 
-# Load models
+# ----------------------------
+# Model Loading Functions
+# ----------------------------
 def load_model(model_class, model_path, device, num_classes=1):
+    """Loads a trained model from a file."""
     model = model_class(n_channels=3, n_classes=num_classes)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
@@ -59,13 +67,19 @@ def load_model(model_class, model_path, device, num_classes=1):
     print("Segmentation model loaded successfully!")
     return model
 
-# Preprocess image
+# ----------------------------
+# Image Preprocessing
+# ----------------------------
 def preprocess_image(image, transform):
+    """Preprocesses an image for model input."""
     image = Image.open(image).convert("RGB")
     return transform(image).unsqueeze(0)
 
-# Perform segmentation
+# ----------------------------
+# Segmentation Function
+# ----------------------------
 def segment_image(image, model_seg, device):
+    """Performs segmentation using U-Net."""
     transform = transforms.Compose([
         transforms.Resize((512, 512)),
         transforms.ToTensor(),
@@ -77,23 +91,30 @@ def segment_image(image, model_seg, device):
         output = model_seg(image_tensor)
     
     mask = output.squeeze().cpu().numpy()
-    mask = (mask > 0.5).astype(np.uint8) * 255
+    mask = (mask > 0.5).astype(np.uint8) * 255  # Binary mask
 
     return image_tensor, mask
 
-# Extract wound area
+# ----------------------------
+# Wound Area Extraction
+# ----------------------------
 def extract_wound_area(image_tensor, mask):
+    """Extracts the wound area using the segmentation mask."""
     mask_tensor = torch.from_numpy(mask).unsqueeze(0).to(image_tensor.device)
     wound_area = image_tensor * mask_tensor
     wound_area_np = wound_area.squeeze().cpu().permute(1, 2, 0).numpy()
     
     wound_image = Image.fromarray((wound_area_np * 255).astype(np.uint8))
-    wound_image.save("temp_wound.png")
+    wound_image_path = "temp_wound.png"
+    wound_image.save(wound_image_path)
     
-    return "temp_wound.png"
+    return wound_image_path
 
-# Classify wound using EfficientNet
-def classify_wound(image_path, model_cls, device):
+# ----------------------------
+# Classification Function (Handles Unknown Class)
+# ----------------------------
+def classify_wound(image_path, model_cls, device, threshold=0.5):
+    """Classifies a wound image and returns 'unknown' if confidence is too low."""
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -104,18 +125,27 @@ def classify_wound(image_path, model_cls, device):
     
     with torch.no_grad():
         outputs = model_cls(image_tensor)
-        _, preds = torch.max(outputs, 1)
-    print("Predicted wound class:", preds.item())
+        probabilities = F.softmax(outputs, dim=1)
+        confidence, preds = torch.max(probabilities, 1)
 
-    return preds.item()
+    print(f"Predicted wound class: {preds.item()}, Confidence: {confidence.item():.4f}")
 
-# Initialize FastAPI
+    # Return "unknown" if confidence is too low
+    print(f"confidence,preds: {confidence.item()},{preds.item()}")
+    if preds.item() < threshold:
+        return "unknown"
+
+    return int(preds.item()) + 1  # Convert class index (0-3) to (1-4)
+
+# ----------------------------
+# FastAPI Server
+# ----------------------------
 app = FastAPI()
 
 # Load models
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-segmentation_model_path = "30_wound_segmentation_model_2025-01-30 11_35_47.pth"
-classification_model_path = "wound_classification_model_2025-01-10 08_20_54.pth"
+segmentation_model_path = "50_after_wound_segmentation_model_2025-02-24 14_28_10.pth"
+classification_model_path = "wound_classification_model_2025-02-27_06-11-59.pth"
 
 model_seg = load_model(UNet, segmentation_model_path, device, num_classes=1)
 
@@ -132,6 +162,7 @@ def read_root():
 
 @app.post("/uploadfile/")
 async def upload_file(file: UploadFile = File(...)):
+    """Handles image upload, segmentation, and classification."""
     file_path = f"temp_{file.filename}"
     
     with open(file_path, "wb") as buffer:
