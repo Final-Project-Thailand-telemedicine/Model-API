@@ -90,50 +90,31 @@ def segment_image(image, model_seg, device):
     with torch.no_grad():
         output = model_seg(image_tensor)
     
-    mask = torch.sigmoid(output).squeeze(0).to(device)
+    mask = output.squeeze().cpu().numpy()
+    mask = (mask > 0.5).astype(np.uint8) * 255  # Binary mask
 
     return image_tensor, mask
 
 # ----------------------------
 # Wound Area Extraction
 # ----------------------------
-def extract_wound_area(image, mask):
-    print(f"Mask shape: {mask.shape}")
-    print(f"Image shape: {image.shape}")
-
-    # Ensure image is a PyTorch tensor
-    if isinstance(image, np.ndarray):
-        image = torch.from_numpy(image).permute(2, 0, 1)  # [H, W, C] -> [C, H, W]
-        image = image.to(mask.device)  # Move to same device as mask
-
-    # Ensure mask is single-channel and properly thresholded
-    mask = mask.squeeze(0)  # Remove batch dimension if present
-    mask = (mask > 0.5).float()  # Convert to binary mask (threshold at 0.5)
-
-    # Expand mask to match image shape
-    if image.shape[0] == 3:  # RGB image
-        mask = mask.repeat(3, 1, 1)  # Expand mask from [1, H, W] to [3, H, W]
-
-    # Apply mask to image
-    wound_area = image * mask  # Element-wise multiply
-    wound_area_np = wound_area.permute(1, 2, 0).cpu().numpy()  # Convert to [H, W, C]
-
-    # Ensure image is in the correct range
-    wound_area_np = (wound_area_np * 255).astype(np.uint8)
-
-    # Convert to PIL image and save
-    wound_image_path = f"wound_area_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
-    Image.fromarray(wound_area_np).save(wound_image_path)
-
+def extract_wound_area(image_tensor, mask):
+    """Extracts the wound area using the segmentation mask."""
+    mask_tensor = torch.from_numpy(mask).unsqueeze(0).to(image_tensor.device)
+    wound_area = image_tensor * mask_tensor
+    wound_area_np = wound_area.squeeze().cpu().permute(1, 2, 0).numpy()
+    
+    wound_image = Image.fromarray((wound_area_np * 255).astype(np.uint8))
+    wound_image_path = "temp_wound.png"
+    wound_image.save(wound_image_path)
+    
     return wound_image_path
-
-
 
 # ----------------------------
 # Classification Function (Handles Unknown Class)
 # ----------------------------
-def classify_wound(image_path, model_cls, device):
-    """Classifies a wound image. If the predicted class is 0, return 'unknown'."""
+def classify_wound(image_path, model_cls, device, threshold=0.5):
+    """Classifies a wound image and returns 'unknown' if confidence is too low."""
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -144,20 +125,17 @@ def classify_wound(image_path, model_cls, device):
     
     with torch.no_grad():
         outputs = model_cls(image_tensor)
-        confidence, preds = torch.max(outputs, 1)
+        probabilities = F.softmax(outputs, dim=1)
+        confidence, preds = torch.max(probabilities, 1)
 
+    print(f"Predicted wound class: {preds.item()}, Confidence: {confidence.item():.4f}")
 
-    confidence_value = confidence.item()
-    predicted_class = preds.item()
-
-    print(f"Predicted class: {predicted_class}, Confidence: {confidence_value:.4f}")
-
-    # If the predicted class is 0, it represents "unknown"
-    if predicted_class == 0:
+    # Return "unknown" if confidence is too low
+    print(f"confidence,preds: {confidence.item()},{preds.item()}")
+    if preds.item() < threshold:
         return "unknown"
 
-    return predicted_class  # No need to add +1 since classes are already indexed from 0-4
-
+    return int(preds.item()) + 1  # Convert class index (0-3) to (1-4)
 
 # ----------------------------
 # FastAPI Server
@@ -167,13 +145,12 @@ app = FastAPI()
 # Load models
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 segmentation_model_path = "50_after_wound_segmentation_model_2025-02-24 14_28_10.pth"
-classification_model_path = "wound_classification_model_2025-03-05_13-56-58.pth"
+classification_model_path = "wound_classification_model_2025-02-27_06-11-59.pth"
 
 model_seg = load_model(UNet, segmentation_model_path, device, num_classes=1)
 
 model_cls = models.efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
-model_cls.classifier[1] = nn.Linear(model_cls.classifier[1].in_features, 5)
-print(model_cls.classifier[1])
+model_cls.classifier[1] = nn.Linear(model_cls.classifier[1].in_features, 4)
 model_cls.load_state_dict(torch.load(classification_model_path, map_location=device))
 model_cls.to(device)
 model_cls.eval()
@@ -192,9 +169,7 @@ async def upload_file(file: UploadFile = File(...)):
         buffer.write(await file.read())
 
     image_tensor, mask = segment_image(file_path, model_seg, device)
-    wound_image_path = extract_wound_area(image_tensor.squeeze(0), mask)
-    wound_image = Image.open(wound_image_path)
-    wound_image.show()
+    wound_image_path = extract_wound_area(image_tensor, mask)
     wound_class = classify_wound(wound_image_path, model_cls, device)
     
     os.remove(file_path)

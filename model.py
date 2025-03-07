@@ -89,55 +89,107 @@ def segment_image(image, model_seg, device):
     
     with torch.no_grad():
         output = model_seg(image_tensor)
-    
-    mask = output.squeeze().cpu().numpy()
-    mask = (mask > 0.5).astype(np.uint8) * 255  # Binary mask
 
-    return image_tensor, mask
+    mask = torch.sigmoid(output).squeeze(0).cpu().numpy()  # Convert to numpy for visualization
+
+    return image_tensor, torch.from_numpy(mask).to(device)
 
 # ----------------------------
 # Wound Area Extraction
 # ----------------------------
+
 def extract_wound_area(image_tensor, mask):
-    """Extracts the wound area using the segmentation mask."""
-    mask_tensor = torch.from_numpy(mask).unsqueeze(0).to(image_tensor.device)
-    wound_area = image_tensor * mask_tensor
-    wound_area_np = wound_area.squeeze().cpu().permute(1, 2, 0).numpy()
+    """Extracts the wound area from the original image using the predicted mask."""
     
-    wound_image = Image.fromarray((wound_area_np * 255).astype(np.uint8))
-    wound_image_path = "temp_wound.png"
-    wound_image.save(wound_image_path)
+    # Debugging
+    print(f"Mask shape: {mask.shape}")  
+    print(f"Image shape: {image_tensor.shape}")  
+
+    # Ensure image is in correct format [C, H, W]
+    if len(image_tensor.shape) == 4:  
+        image_tensor = image_tensor.squeeze(0)
+
+    # Convert tensors to NumPy
+    image_np = image_tensor.permute(1, 2, 0).cpu().numpy() * 255  
+    image_np = image_np.astype(np.uint8)  # Convert to uint8 for saving
+
+    # Convert mask to NumPy and apply a stronger threshold
+    mask_np = mask.squeeze(0).cpu().numpy()
     
+    binary_mask = (mask_np > 0.7).astype(np.float32)  # Hard threshold to define wound region
+    soft_mask = np.clip(mask_np, 0, 1)  # Preserve soft edges
+    
+    # Combine masks: use binary mask to define the region, but keep soft edges
+    final_mask = binary_mask * soft_mask
+    
+    # Expand mask to 3 channels for RGB images
+    mask_3channel = np.stack([final_mask] * 3, axis=-1)  
+
+    # Apply masking
+    wound_area = (image_np * mask_3channel).astype(np.uint8)
+
+    # Save the extracted wound area
+    wound_image_path = f"wound_area_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
+    Image.fromarray(wound_area).save(wound_image_path)
+
     return wound_image_path
 
 # ----------------------------
 # Classification Function (Handles Unknown Class)
 # ----------------------------
-def classify_wound(image_path, model_cls, device, threshold=0.5):
-    """Classifies a wound image and returns 'unknown' if confidence is too low."""
+def classify_wound(image_path, model_cls, device):
+    """
+    Classifies a wound image and handles the issue of extreme confidence.
+    
+    Args:
+        image_path: Path to the wound image
+        model_cls: The classification model
+        device: Device to run the model on (CPU/GPU)
+        
+    Returns:
+        String representing the class name or "unknown"
+    """
+    # Define class names
+    class_names = [4, 3, 2, 1, "unknown"]
+    
+    # Prepare the image with the same transformations used during training
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
+    # Load and transform the image
     image_tensor = preprocess_image(image_path, transform).to(device)
     
+    # Get model prediction
     with torch.no_grad():
-        outputs = model_cls(image_tensor)
-        probabilities = F.softmax(outputs, dim=1)
-        confidence, preds = torch.max(probabilities, 1)
+        logits = model_cls(image_tensor).squeeze(0)
+        raw_logits = logits.cpu().numpy()
+        print(f"Raw logits: {raw_logits}")
 
-    print(f"Predicted wound class: {preds.item()}, Confidence: {confidence.item():.4f}")
+        # Apply temperature scaling to prevent extreme confidence
+        temperature = 10  # Adjust this value if needed
+        logits = logits / temperature
 
-    # Return "unknown" if confidence is too low
-    print(f"confidence,preds: {confidence.item()},{preds.item()}")
-    if preds.item() < threshold:
-        return "unknown"
+        # Clip logits to prevent extreme values
+        logits = torch.clamp(logits, min=-50, max=50)
 
-    return int(preds.item()) + 1  # Convert class index (0-3) to (1-4)
+        # Compute softmax probabilities
+        probabilities = F.softmax(logits, dim=0)
+        final_prediction = torch.argmax(probabilities).item()
+        confidence = probabilities[final_prediction].item()
 
-# ----------------------------
+        print(f"Final prediction: {class_names[final_prediction]}")
+        print(f"Confidence: {confidence:.4f}")
+
+        # If confidence is too high and logit range is extreme, classify as "unknown"
+        logit_range = np.max(raw_logits) - np.min(raw_logits)
+        if logit_range > 1000 or confidence > 0.99:
+            return "unknown"
+
+        return class_names[final_prediction]
+
 # FastAPI Server
 # ----------------------------
 app = FastAPI()
@@ -145,12 +197,13 @@ app = FastAPI()
 # Load models
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 segmentation_model_path = "50_after_wound_segmentation_model_2025-02-24 14_28_10.pth"
-classification_model_path = "wound_classification_model_2025-02-27_06-11-59.pth"
+classification_model_path = "wound_classification_model_2025-03-05_13-56-58.pth"
 
 model_seg = load_model(UNet, segmentation_model_path, device, num_classes=1)
 
 model_cls = models.efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
-model_cls.classifier[1] = nn.Linear(model_cls.classifier[1].in_features, 4)
+model_cls.classifier[1] = nn.Linear(model_cls.classifier[1].in_features, 5)
+print(model_cls.classifier[1])
 model_cls.load_state_dict(torch.load(classification_model_path, map_location=device))
 model_cls.to(device)
 model_cls.eval()
@@ -168,10 +221,16 @@ async def upload_file(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
 
+    # Step 1: Predict segmentation mask
     image_tensor, mask = segment_image(file_path, model_seg, device)
-    wound_image_path = extract_wound_area(image_tensor, mask)
+
+    # Step 2: Extract wound area from original image
+    wound_image_path = extract_wound_area(image_tensor.squeeze(0), mask)
+
+    # Step 3: Classify wound type using extracted wound area
     wound_class = classify_wound(wound_image_path, model_cls, device)
-    
+
+    # Step 4: Clean up files
     os.remove(file_path)
     os.remove(wound_image_path)
     
