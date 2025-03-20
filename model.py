@@ -59,7 +59,7 @@ class UNet(nn.Module):
 # Model Loading Functions
 # ----------------------------
 def load_model(model_class, model_path, device, num_classes=1):
-    """Loads a trained model from a file."""
+
     model = model_class(n_channels=3, n_classes=num_classes)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
@@ -71,7 +71,7 @@ def load_model(model_class, model_path, device, num_classes=1):
 # Image Preprocessing
 # ----------------------------
 def preprocess_image(image, transform):
-    """Preprocesses an image for model input."""
+
     image = Image.open(image).convert("RGB")
     return transform(image).unsqueeze(0)
 
@@ -99,8 +99,7 @@ def segment_image(image, model_seg, device):
 # ----------------------------
 
 def extract_wound_area(image_tensor, mask):
-    """Extracts the wound area from the original image using the predicted mask."""
-    
+
     # Debugging
     print(f"Mask shape: {mask.shape}")  
     print(f"Image shape: {image_tensor.shape}")  
@@ -138,17 +137,7 @@ def extract_wound_area(image_tensor, mask):
 # Classification Function (Handles Unknown Class)
 # ----------------------------
 def classify_wound(image_path, model_cls, device):
-    """
-    Classifies a wound image and handles the issue of extreme confidence.
-    
-    Args:
-        image_path: Path to the wound image
-        model_cls: The classification model
-        device: Device to run the model on (CPU/GPU)
-        
-    Returns:
-        String representing the class name or "unknown"
-    """
+
     # Define class names
     class_names = [4, 3, 2, 1, "unknown"]
     
@@ -215,7 +204,7 @@ def read_root():
 
 @app.post("/uploadfile/")
 async def upload_file(file: UploadFile = File(...)):
-    """Handles image upload, segmentation, and classification."""
+
     file_path = f"temp_{file.filename}"
     
     with open(file_path, "wb") as buffer:
